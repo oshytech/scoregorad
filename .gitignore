@@ -1,0 +1,39 @@
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/dist/
+/tmp/
+
+# Go workspace
+vendor/
+*.sum
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Docker volumes
+postgres-data/
+redis-data/
