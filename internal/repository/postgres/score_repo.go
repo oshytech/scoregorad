@@ -35,8 +35,14 @@ func (r *ScoreRepo) Create(ctx context.Context, s *domain.Score) error {
 }
 
 // GetLeaderboard devuelve la mejor puntuación de cada jugador para un juego.
-// Usa DISTINCT ON de PostgreSQL para obtener el mejor score por jugador en una
-// sola pasada, sin subquery ni window function. En Fase 2 evaluaremos si escala.
+//
+// Usa una CTE con ROW_NUMBER() en lugar de DISTINCT ON porque DISTINCT ON no
+// compone bien con LIMIT/OFFSET: el planificador puede aplicar el límite antes
+// de ordenar el resultado exterior, produciendo páginas incorrectas.
+//
+// ROW_NUMBER() particiona por player_id y ordena por (points DESC, created_at ASC),
+// lo que garantiza que rn=1 siempre sea el mejor score del jugador. La query
+// exterior puede paginar de forma segura sobre el conjunto ya ordenado.
 //
 // Si seasonID es vacío, devuelve el ranking global (sin filtrar por temporada).
 func (r *ScoreRepo) GetLeaderboard(ctx context.Context, gameID, seasonID string, limit, offset int) ([]domain.LeaderboardEntry, error) {
@@ -45,35 +51,45 @@ func (r *ScoreRepo) GetLeaderboard(ctx context.Context, gameID, seasonID string,
 
 	if seasonID == "" {
 		q = `
-		SELECT player_id, username, points, achieved_at
-		FROM (
-		    SELECT DISTINCT ON (s.player_id)
+		WITH ranked AS (
+		    SELECT
 		        s.player_id,
 		        p.username,
 		        s.points,
-		        s.created_at AS achieved_at
+		        s.created_at AS achieved_at,
+		        ROW_NUMBER() OVER (
+		            PARTITION BY s.player_id
+		            ORDER BY s.points DESC, s.created_at ASC
+		        ) AS rn
 		    FROM scores s
 		    JOIN players p ON p.id = s.player_id
 		    WHERE s.game_id = $1
-		    ORDER BY s.player_id, s.points DESC, s.created_at ASC
-		) best
+		)
+		SELECT player_id, username, points, achieved_at
+		FROM ranked
+		WHERE rn = 1
 		ORDER BY points DESC, achieved_at ASC
 		LIMIT $2 OFFSET $3`
 		args = []any{gameID, limit, offset}
 	} else {
 		q = `
-		SELECT player_id, username, points, achieved_at
-		FROM (
-		    SELECT DISTINCT ON (s.player_id)
+		WITH ranked AS (
+		    SELECT
 		        s.player_id,
 		        p.username,
 		        s.points,
-		        s.created_at AS achieved_at
+		        s.created_at AS achieved_at,
+		        ROW_NUMBER() OVER (
+		            PARTITION BY s.player_id
+		            ORDER BY s.points DESC, s.created_at ASC
+		        ) AS rn
 		    FROM scores s
 		    JOIN players p ON p.id = s.player_id
 		    WHERE s.game_id = $1 AND s.season_id = $2
-		    ORDER BY s.player_id, s.points DESC, s.created_at ASC
-		) best
+		)
+		SELECT player_id, username, points, achieved_at
+		FROM ranked
+		WHERE rn = 1
 		ORDER BY points DESC, achieved_at ASC
 		LIMIT $3 OFFSET $4`
 		args = []any{gameID, seasonID, limit, offset}
@@ -100,8 +116,9 @@ func (r *ScoreRepo) GetLeaderboard(ctx context.Context, gameID, seasonID string,
 }
 
 // GetPlayerRank calcula la posición de un jugador en el ranking.
-// En Fase 1 esto es intencionalmente naive: cuenta cuántos jugadores
-// tienen una mejor puntuación. En Fase 2 lo optimizaremos con índices.
+// Reutiliza el mismo patrón CTE de GetLeaderboard para consistencia:
+// primero obtiene el mejor score de cada jugador, luego cuenta cuántos
+// tienen más puntos que el jugador consultado.
 func (r *ScoreRepo) GetPlayerRank(ctx context.Context, gameID, playerID, seasonID string) (int, error) {
 	var q string
 	var args []any
@@ -109,10 +126,14 @@ func (r *ScoreRepo) GetPlayerRank(ctx context.Context, gameID, playerID, seasonI
 	if seasonID == "" {
 		q = `
 		WITH best AS (
-		    SELECT DISTINCT ON (player_id) player_id, points
-		    FROM scores
-		    WHERE game_id = $1
-		    ORDER BY player_id, points DESC, created_at ASC
+		    SELECT player_id, points
+		    FROM (
+		        SELECT player_id, points,
+		               ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY points DESC, created_at ASC) AS rn
+		        FROM scores
+		        WHERE game_id = $1
+		    ) sub
+		    WHERE rn = 1
 		),
 		player_best AS (
 		    SELECT points FROM best WHERE player_id = $2
@@ -125,10 +146,14 @@ func (r *ScoreRepo) GetPlayerRank(ctx context.Context, gameID, playerID, seasonI
 	} else {
 		q = `
 		WITH best AS (
-		    SELECT DISTINCT ON (player_id) player_id, points
-		    FROM scores
-		    WHERE game_id = $1 AND season_id = $2
-		    ORDER BY player_id, points DESC, created_at ASC
+		    SELECT player_id, points
+		    FROM (
+		        SELECT player_id, points,
+		               ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY points DESC, created_at ASC) AS rn
+		        FROM scores
+		        WHERE game_id = $1 AND season_id = $2
+		    ) sub
+		    WHERE rn = 1
 		),
 		player_best AS (
 		    SELECT points FROM best WHERE player_id = $3
