@@ -5,21 +5,21 @@ const (
 	MaxPageSize     = 100
 )
 
-// CursorPage agrupa los parámetros de paginación de una petición.
-// Nota: el nombre es un error que corregiremos en el siguiente commit —
-// esto no es paginación por cursor, sino por offset.
-type CursorPage struct {
+// Page agrupa los parámetros de paginación offset-based.
+// Implementa paginación por offset, no por cursor —
+// el nombre anterior (CursorPage) era incorrecto.
+type Page struct {
 	Limit  int
 	Offset int
 }
 
-// NewCursorPage crea una página validando los límites.
-func NewCursorPage(limit, offset int) CursorPage {
+// NewPage crea una página validando los límites.
+func NewPage(limit, offset int) Page {
 	if limit <= 0 || limit > MaxPageSize {
 		limit = DefaultPageSize
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	return CursorPage{Limit: limit, Offset: offset}
+	return Page{Limit: limit, Offset: offset}
 }
