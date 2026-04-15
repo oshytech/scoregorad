@@ -54,9 +54,9 @@ func (h *ScoreHandler) GetLeaderboard(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("gameId")
 	seasonID := r.PathValue("seasonId") // vacío si la ruta es /leaderboard sin temporada
 
-	limit, offset := parsePagination(r)
+	page := parseCursorPage(r)
 
-	entries, err := h.svc.GetLeaderboard(r.Context(), gameID, seasonID, limit, offset)
+	entries, err := h.svc.GetLeaderboard(r.Context(), gameID, seasonID, page.Limit, page.Offset)
 	if err != nil {
 		respondError(w, err)
 		return
@@ -83,7 +83,8 @@ func (h *ScoreHandler) GetPlayerRank(w http.ResponseWriter, r *http.Request) {
 
 func (h *ScoreHandler) GetPlayerScores(w http.ResponseWriter, r *http.Request) {
 	playerID := r.PathValue("playerId")
-	limit, offset := parsePagination(r)
+	page := parseCursorPage(r)
+	limit, offset := page.Limit, page.Offset
 
 	scores, err := h.svc.GetPlayerScores(r.Context(), playerID, limit, offset)
 	if err != nil {
@@ -96,18 +97,17 @@ func (h *ScoreHandler) GetPlayerScores(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, scores)
 }
 
-func parsePagination(r *http.Request) (limit, offset int) {
-	limit = 25
-	offset = 0
+func parseCursorPage(r *http.Request) domain.CursorPage {
+	var limit, offset int
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil {
 			limit = n
 		}
 	}
 	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(v); err == nil {
 			offset = n
 		}
 	}
-	return
+	return domain.NewCursorPage(limit, offset)
 }
