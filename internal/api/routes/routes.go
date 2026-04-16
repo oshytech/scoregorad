@@ -2,6 +2,7 @@ package routes
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/oshy/score-gorad/internal/api/handlers"
 	"github.com/oshy/score-gorad/internal/api/middleware"
@@ -27,5 +28,8 @@ func Setup(games *handlers.GameHandler, scores *handlers.ScoreHandler) http.Hand
 	// Historial del jugador
 	mux.HandleFunc("GET /players/{playerId}/scores", scores.GetPlayerScores)
 
-	return middleware.Logging(mux)
+	// Orden de middlewares: Timeout envuelve a Logging envuelve al mux.
+	// El timeout se aplica antes del logging para que la duración registrada
+	// incluya el tiempo de espera si se excede.
+	return middleware.Timeout(5 * time.Second)(middleware.Logging(mux))
 }
