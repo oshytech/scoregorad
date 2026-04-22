@@ -8,6 +8,7 @@ import (
 type Config struct {
 	ServerPort  string
 	DatabaseURL string
+	RedisURL    string
 	Environment string
 }
 
@@ -21,6 +22,7 @@ func Load() (*Config, error) {
 	return &Config{
 		ServerPort:  port,
 		DatabaseURL: dbURL,
+		RedisURL:    getEnv("REDIS_URL", ""),
 		Environment: getEnv("APP_ENV", "development"),
 	}, nil
 }
