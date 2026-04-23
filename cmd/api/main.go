@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/oshy/score-gorad/internal/api/handlers"
 	"github.com/oshy/score-gorad/internal/api/routes"
 	"github.com/oshy/score-gorad/internal/config"
-	"github.com/oshy/score-gorad/internal/repository/postgres"
+	"github.com/oshy/score-gorad/internal/domain"
+	pgrepo "github.com/oshy/score-gorad/internal/repository/postgres"
+	redisr "github.com/oshy/score-gorad/internal/repository/redis"
 	"github.com/oshy/score-gorad/internal/service"
 )
 
@@ -18,25 +21,37 @@ func main() {
 		log.Fatalf("loading config: %v", err)
 	}
 
-	// Infraestructura
-	db, err := postgres.NewDB(cfg.DatabaseURL)
+	// Infraestructura — Postgres
+	db, err := pgrepo.NewDB(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("connecting to database: %v", err)
 	}
 	defer db.Close()
 
-	// Repositories
-	gameRepo := postgres.NewGameRepo(db)
-	playerRepo := postgres.NewPlayerRepo(db)
-	scoreRepo := postgres.NewScoreRepo(db)
-	seasonRepo := postgres.NewSeasonRepo(db)
+	// Repositories (capa postgres)
+	gameRepo := pgrepo.NewGameRepo(db)
+	playerRepo := pgrepo.NewPlayerRepo(db)
+	scoreRepo := pgrepo.NewScoreRepo(db)
+	seasonRepo := pgrepo.NewSeasonRepo(db)
 
-	// Evitar "declared and not used" en playerRepo hasta que se use en un handler futuro.
 	_ = playerRepo
+
+	// Si REDIS_URL está configurado, envolvemos el scoreRepo con la caché.
+	// ScoreService sigue recibiendo domain.ScoreRepository — no sabe nada de Redis.
+	var scoreRepoFinal domain.ScoreRepository = scoreRepo
+	if cfg.RedisURL != "" {
+		redisClient, err := redisr.NewClient(cfg.RedisURL)
+		if err != nil {
+			log.Printf("warning: could not connect to Redis (%v), running without cache", err)
+		} else {
+			scoreRepoFinal = redisr.NewCachedScoreRepository(scoreRepo, redisClient, 2*time.Minute)
+			log.Println("leaderboard cache enabled (Redis)")
+		}
+	}
 
 	// Services
 	gameSvc := service.NewGameService(gameRepo)
-	scoreSvc := service.NewScoreService(scoreRepo, gameRepo, seasonRepo)
+	scoreSvc := service.NewScoreService(scoreRepoFinal, gameRepo, seasonRepo)
 
 	// Handlers
 	gameHandler := handlers.NewGameHandler(gameSvc)
