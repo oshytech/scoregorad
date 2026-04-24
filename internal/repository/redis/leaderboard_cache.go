@@ -72,7 +72,13 @@ func (r *CachedScoreRepository) GetLeaderboard(ctx context.Context, gameID, seas
 
 	// Guardar en caché. Si falla, no es crítico — el servicio sigue funcionando.
 	if payload, jsonErr := json.Marshal(entries); jsonErr == nil {
-		_ = r.cache.Set(ctx, key, payload, r.ttl).Err()
+		pipe := r.cache.Pipeline()
+		pipe.Set(ctx, key, payload, r.ttl)
+		// Registramos la clave en un Set por juego para poder invalidarla
+		// sin usar KEYS. El Set tiene el mismo TTL que la entrada más un margen.
+		pipe.SAdd(ctx, gameTrackKey(gameID), key)
+		pipe.Expire(ctx, gameTrackKey(gameID), r.ttl+30*time.Second)
+		_, _ = pipe.Exec(ctx)
 	}
 
 	return entries, nil
@@ -92,18 +98,26 @@ func (r *CachedScoreRepository) GetPlayerScores(ctx context.Context, playerID st
 }
 
 // invalidateGame elimina todas las entradas de caché de leaderboard para un juego.
-// Usamos KEYS con patrón para encontrar todas las claves del juego y borrarlas.
 //
-// ADVERTENCIA: KEYS bloquea Redis mientras escanea todo el keyspace.
-// En producción con millones de claves esto puede causar latencias de segundos.
-// Lo corregiremos en el siguiente commit.
+// Versión corregida: en lugar de KEYS (que bloquea Redis en producción),
+// mantenemos un Set por juego con las claves activas. Al invalidar, leemos
+// el Set, borramos todas las claves registradas y el propio Set con una
+// pipeline para minimizar round-trips.
+//
+// KEYS es O(N) sobre todo el keyspace y puede bloquear Redis durante segundos
+// en instancias con millones de claves. Con un Set auxiliar la operación es
+// O(M) donde M es el número de páginas cacheadas para ese juego — típicamente
+// un número pequeño y acotado.
 func (r *CachedScoreRepository) invalidateGame(ctx context.Context, gameID string) {
-	pattern := fmt.Sprintf("lb:%s:*", gameID)
-	keys, err := r.cache.Keys(ctx, pattern).Result()
+	trackKey := gameTrackKey(gameID)
+	keys, err := r.cache.SMembers(ctx, trackKey).Result()
 	if err != nil || len(keys) == 0 {
 		return
 	}
-	_ = r.cache.Del(ctx, keys...).Err()
+	pipe := r.cache.Pipeline()
+	pipe.Del(ctx, keys...)
+	pipe.Del(ctx, trackKey)
+	_, _ = pipe.Exec(ctx)
 }
 
 // leaderboardKey genera la clave de caché para un leaderboard paginado.
