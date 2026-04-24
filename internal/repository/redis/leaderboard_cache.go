@@ -92,18 +92,18 @@ func (r *CachedScoreRepository) GetPlayerScores(ctx context.Context, playerID st
 }
 
 // invalidateGame elimina todas las entradas de caché de leaderboard para un juego.
-// La implementación actual usa una clave de set en Redis que registra todas las
-// claves activas del juego — más segura que KEYS con patrón en producción.
+// Usamos KEYS con patrón para encontrar todas las claves del juego y borrarlas.
+//
+// ADVERTENCIA: KEYS bloquea Redis mientras escanea todo el keyspace.
+// En producción con millones de claves esto puede causar latencias de segundos.
+// Lo corregiremos en el siguiente commit.
 func (r *CachedScoreRepository) invalidateGame(ctx context.Context, gameID string) {
-	trackKey := gameTrackKey(gameID)
-	keys, err := r.cache.SMembers(ctx, trackKey).Result()
+	pattern := fmt.Sprintf("lb:%s:*", gameID)
+	keys, err := r.cache.Keys(ctx, pattern).Result()
 	if err != nil || len(keys) == 0 {
 		return
 	}
-	pipe := r.cache.Pipeline()
-	pipe.Del(ctx, keys...)
-	pipe.Del(ctx, trackKey)
-	_, _ = pipe.Exec(ctx)
+	_ = r.cache.Del(ctx, keys...).Err()
 }
 
 // leaderboardKey genera la clave de caché para un leaderboard paginado.
