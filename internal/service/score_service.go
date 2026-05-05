@@ -3,16 +3,19 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/oshy/score-gorad/internal/domain"
+	"github.com/oshy/score-gorad/internal/worker"
 )
 
 type ScoreService struct {
 	scores  domain.ScoreRepository
 	games   domain.GameRepository
 	seasons domain.SeasonRepository
+	pool    *worker.Pool // opcional: nil si el procesamiento asíncrono está desactivado
 }
 
 func NewScoreService(
@@ -21,6 +24,12 @@ func NewScoreService(
 	seasons domain.SeasonRepository,
 ) *ScoreService {
 	return &ScoreService{scores: scores, games: games, seasons: seasons}
+}
+
+// WithWorkerPool inyecta el pool de workers para procesamiento asíncrono.
+// Si no se llama, SubmitScore funciona igual pero sin efectos secundarios async.
+func (s *ScoreService) WithWorkerPool(pool *worker.Pool) {
+	s.pool = pool
 }
 
 type SubmitScoreInput struct {
@@ -65,6 +74,20 @@ func (s *ScoreService) SubmitScore(ctx context.Context, in SubmitScoreInput) (*d
 	if err := s.scores.Create(ctx, score); err != nil {
 		return nil, err
 	}
+
+	// Enviar evento al pool para procesamiento asíncrono (efectos secundarios).
+	// Si el pool está lleno se descarta: el cliente ya tiene su 201, no bloqueamos.
+	if s.pool != nil {
+		if err := s.pool.Submit(worker.ScoreEvent{
+			GameID:   score.GameID,
+			PlayerID: score.PlayerID,
+			Points:   score.Points,
+			SeasonID: score.SeasonID,
+		}); err != nil {
+			log.Printf("score event dropped (pool full): game=%s player=%s", score.GameID, score.PlayerID)
+		}
+	}
+
 	return score, nil
 }
 
