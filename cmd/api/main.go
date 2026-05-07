@@ -55,7 +55,13 @@ func main() {
 
 	// ── Worker pool ───────────────────────────────────────────────────────────
 
-	pool := worker.New(4, 256)
+	pool := worker.New(256,
+		worker.WithRetry(3, 200*time.Millisecond),
+		worker.WithErrorHandler(func(event worker.ScoreEvent, err error, attempts int) {
+			log.Printf("worker: event permanently failed after %d attempts game=%s player=%s err=%v",
+				attempts, event.GameID, event.PlayerID, err)
+		}),
+	)
 	pool.Start(4, func(event worker.ScoreEvent) error {
 		// Aquí irían los efectos secundarios: notificaciones, estadísticas, etc.
 		// Por ahora solo logueamos el evento para demostrar el flujo.
