@@ -84,6 +84,11 @@ func New(bufferSize int, opts ...Option) *Pool {
 // El processor no debería panic — si lo hace, es un bug que queremos
 // ver en los logs, no silenciar. La decisión de recuperar o no depende
 // del contexto; aquí preferimos fallar ruidosamente.
+//
+// Comportamiento en shutdown:
+// Cuando se cierra quit, el worker termina el job actual y luego drena
+// el buffer con lecturas no-bloqueantes antes de salir. Esto garantiza
+// que los jobs ya encolados se procesan aunque llegue la señal de cierre.
 func (p *Pool) Start(numWorkers int, processor Processor) {
 	for range numWorkers {
 		p.wg.Add(1)
@@ -97,7 +102,19 @@ func (p *Pool) Start(numWorkers int, processor Processor) {
 					}
 					p.process(job, processor)
 				case <-p.quit:
-					return
+					// Drenar el buffer antes de salir: cualquier job que ya
+					// estaba encolado cuando llegó la señal se procesa igualmente.
+					for {
+						select {
+						case job, ok := <-p.jobs:
+							if !ok {
+								return
+							}
+							p.process(job, processor)
+						default:
+							return
+						}
+					}
 				}
 			}
 		}()
