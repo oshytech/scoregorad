@@ -8,11 +8,26 @@ import (
 	"github.com/oshy/score-gorad/internal/api/middleware"
 )
 
-func Setup(games *handlers.GameHandler, scores *handlers.ScoreHandler) http.Handler {
+// Setup registra las rutas y aplica la cadena de middlewares.
+//
+// Orden de middlewares (de fuera hacia dentro):
+//  1. RequestID    — genera el ID antes de que nada más se ejecute.
+//  2. RequestIDLogger — añade request_id al logger del context.
+//  3. Timeout      — deadline antes del logging para medir tiempo real.
+//  4. Logging      — registra la petición con slog estructurado.
+//  5. Auth         — rechaza peticiones sin API key válida.
+//  6. RateLimit    — limita requests por key.
+//  7. mux          — enrutado a handlers.
+func Setup(
+	games *handlers.GameHandler,
+	scores *handlers.ScoreHandler,
+	health http.HandlerFunc,
+	validKeys map[string]struct{},
+) http.Handler {
 	mux := http.NewServeMux()
 
-	// Health
-	mux.HandleFunc("GET /health", handlers.HealthHandler)
+	// /health y /metrics no requieren auth (ver Auth middleware)
+	mux.HandleFunc("GET /health", health)
 
 	// Games
 	mux.HandleFunc("POST /games", games.CreateGame)
@@ -28,8 +43,19 @@ func Setup(games *handlers.GameHandler, scores *handlers.ScoreHandler) http.Hand
 	// Historial del jugador
 	mux.HandleFunc("GET /players/{playerId}/scores", scores.GetPlayerScores)
 
-	// Orden de middlewares: Timeout envuelve a Logging envuelve al mux.
-	// El timeout se aplica antes del logging para que la duración registrada
-	// incluya el tiempo de espera si se excede.
-	return middleware.Timeout(5 * time.Second)(middleware.Logging(mux))
+	chain := middleware.RequestID(
+		middleware.RequestIDLogger(
+			middleware.Timeout(5*time.Second)(
+				middleware.Logging(
+					middleware.Auth(validKeys)(
+						middleware.RateLimit(20, 40)(
+							mux,
+						),
+					),
+				),
+			),
+		),
+	)
+
+	return chain
 }

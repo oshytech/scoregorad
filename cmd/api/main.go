@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +14,7 @@ import (
 	"github.com/oshy/score-gorad/internal/api/routes"
 	"github.com/oshy/score-gorad/internal/config"
 	"github.com/oshy/score-gorad/internal/domain"
+	"github.com/oshy/score-gorad/internal/observability"
 	pgrepo "github.com/oshy/score-gorad/internal/repository/postgres"
 	redisr "github.com/oshy/score-gorad/internal/repository/redis"
 	"github.com/oshy/score-gorad/internal/service"
@@ -23,14 +24,19 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("loading config: %v", err)
+		slog.Error("loading config", "error", err)
+		os.Exit(1)
 	}
+
+	logger := observability.NewLogger(cfg.Environment)
+	slog.SetDefault(logger)
 
 	// ── Infraestructura ──────────────────────────────────────────────────────
 
 	db, err := pgrepo.NewDB(cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("connecting to database: %v", err)
+		logger.Error("connecting to database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -43,13 +49,16 @@ func main() {
 	_ = playerRepo
 
 	var scoreRepoFinal domain.ScoreRepository = scoreRepo
+	var redisClient interface{ Close() error }
+
 	if cfg.RedisURL != "" {
-		redisClient, err := redisr.NewClient(cfg.RedisURL)
+		rc, err := redisr.NewClient(cfg.RedisURL)
 		if err != nil {
-			log.Printf("warning: could not connect to Redis (%v), running without cache", err)
+			logger.Warn("could not connect to Redis, running without cache", "error", err)
 		} else {
-			scoreRepoFinal = redisr.NewCachedScoreRepository(scoreRepo, redisClient, 2*time.Minute)
-			log.Println("leaderboard cache enabled (Redis)")
+			redisClient = rc
+			scoreRepoFinal = redisr.NewCachedScoreRepository(scoreRepo, rc, 2*time.Minute)
+			logger.Info("leaderboard cache enabled", "backend", "redis")
 		}
 	}
 
@@ -58,15 +67,20 @@ func main() {
 	pool := worker.New(256,
 		worker.WithRetry(3, 200*time.Millisecond),
 		worker.WithErrorHandler(func(event worker.ScoreEvent, err error, attempts int) {
-			log.Printf("worker: event permanently failed after %d attempts game=%s player=%s err=%v",
-				attempts, event.GameID, event.PlayerID, err)
+			logger.Error("worker event permanently failed",
+				"game_id", event.GameID,
+				"player_id", event.PlayerID,
+				"attempts", attempts,
+				"error", err,
+			)
 		}),
 	)
 	pool.Start(4, func(event worker.ScoreEvent) error {
-		// Aquí irían los efectos secundarios: notificaciones, estadísticas, etc.
-		// Por ahora solo logueamos el evento para demostrar el flujo.
-		log.Printf("worker: processed score game=%s player=%s points=%d",
-			event.GameID, event.PlayerID, event.Points)
+		logger.Info("worker: score processed",
+			"game_id", event.GameID,
+			"player_id", event.PlayerID,
+			"points", event.Points,
+		)
 		return nil
 	})
 
@@ -76,35 +90,28 @@ func main() {
 	scoreSvc := service.NewScoreService(scoreRepoFinal, gameRepo, seasonRepo)
 	scoreSvc.WithWorkerPool(pool)
 
-	// ── HTTP server ───────────────────────────────────────────────────────────
+	// ── Handlers ─────────────────────────────────────────────────────────────
 
 	gameHandler := handlers.NewGameHandler(gameSvc)
 	scoreHandler := handlers.NewScoreHandler(scoreSvc)
-	router := routes.Setup(gameHandler, scoreHandler)
+	healthHandler := handlers.NewHealthHandler(db, redisClient)
+
+	// ── HTTP server ───────────────────────────────────────────────────────────
+
+	router := routes.Setup(gameHandler, scoreHandler, healthHandler, cfg.APIKeys)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.ServerPort),
 		Handler: router,
 	}
 
-	// Lanzar el servidor en una goroutine separada para poder esperar señales
-	// en el hilo principal sin bloquear.
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("scoreGOard listening on :%s", cfg.ServerPort)
+		logger.Info("scoreGOard started", "port", cfg.ServerPort, "env", cfg.Environment)
 		serverErr <- server.ListenAndServe()
 	}()
 
 	// ── Graceful shutdown ────────────────────────────────────────────────────
-	//
-	// Esperamos SIGINT (Ctrl+C) o SIGTERM (señal de Kubernetes / Docker).
-	// El orden de shutdown importa:
-	//  1. Servidor HTTP: deja de aceptar nuevas conexiones, drena las activas.
-	//  2. Worker pool: espera que terminen los jobs en vuelo.
-	//  3. Postgres: se cierra con defer al salir de main.
-	//
-	// Si cerramos Postgres antes de que los workers terminen, las operaciones
-	// de DB en curso devolverán error. El orden correcto es fundamental.
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -112,27 +119,29 @@ func main() {
 	select {
 	case err := <-serverErr:
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logger.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	case sig := <-quit:
-		log.Printf("received signal %s, shutting down...", sig)
+		logger.Info("shutdown signal received", "signal", sig.String())
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 1. Parar el servidor HTTP
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		logger.Error("HTTP server shutdown error", "error", err)
 	}
-	log.Println("HTTP server stopped")
+	logger.Info("HTTP server stopped")
 
-	// 2. Drenar el worker pool
 	if err := pool.Shutdown(shutdownCtx); err != nil {
-		log.Printf("worker pool shutdown error: %v", err)
+		logger.Error("worker pool shutdown error", "error", err)
 	}
-	log.Println("worker pool drained")
+	logger.Info("worker pool drained")
 
-	// 3. Postgres se cierra con el defer db.Close() al final de main
-	log.Println("scoreGOard stopped")
+	if redisClient != nil {
+		_ = redisClient.Close()
+	}
+
+	logger.Info("scoreGOard stopped")
 }
