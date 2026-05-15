@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/oshy/score-gorad/internal/api/handlers"
 	"github.com/oshy/score-gorad/internal/api/middleware"
 )
@@ -28,6 +30,7 @@ func Setup(
 
 	// /health y /metrics no requieren auth (ver Auth middleware)
 	mux.HandleFunc("GET /health", health)
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Games
 	mux.HandleFunc("POST /games", games.CreateGame)
@@ -49,7 +52,7 @@ func Setup(
 				middleware.Logging(
 					middleware.Auth(validKeys)(
 						middleware.RateLimit(20, 40)(
-							mux,
+							middleware.Metrics(mux),
 						),
 					),
 				),
