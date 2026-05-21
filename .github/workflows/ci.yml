@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scoregorad_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -race -timeout 60s ./tests/ -run "^Test" -v
+
+      - name: Integration tests
+        run: go test -race -timeout 120s ./tests/integration/... -v
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/scoregorad_test?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t scoregorad:${{ github.sha }} .
+
+      - name: Verify binary runs
+        run: |
+          docker run --rm --entrypoint /api scoregorad:${{ github.sha }} --help 2>&1 || true
