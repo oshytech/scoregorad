@@ -152,3 +152,7 @@ DATABASE_URL="..." go test -bench=. -benchmem ./tests/
 | 3    | Caché con Redis (cache-aside)             |
 | 4    | Worker pool y graceful shutdown           |
 | 5    | Auth, rate limiting, métricas y Docker    |
+
+## Créditos
+
+La idea original de este proyecto es de [Marc Estupiña](https://github.com/Kermeth).
